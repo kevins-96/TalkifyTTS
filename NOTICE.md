@@ -12,6 +12,7 @@
 | DashScope SDK（com.alibaba.dashscope） | Apache-2.0 | 阿里云 |
 | 腾讯云流式 TTS SDK（stream_tts AAR） | 版权所有，腾讯云 | 经官方渠道获取的发行包 |
 | sherpa-onnx（定制 AAR） | Apache-2.0 | k2-fsa；本仓使用静态链接 onnxruntime 的定制构建 |
+| Sonic（源码内置，`service/provider/sonic/Sonic.java`） | Apache-2.0 | Bill Cox，https://github.com/waywardgeek/sonic ；用于本地变速不变调 |
 | JLayer 1.0.1 | LGPL-2.1 | JavaZoom，MP3 解码；源码：http://www.javazoom.net/javalayer/sources.html |
 
 > LGPL 合规说明：JLayer 以静态方式打包进 APK。如你认为该使用方式需要补充

@@ -6,6 +6,10 @@ import com.alibaba.dashscope.aigc.multimodalconversation.AudioParameters
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam
 import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationResult
+import com.alibaba.dashscope.audio.http_tts.HttpSpeechSynthesisParam
+import com.alibaba.dashscope.audio.http_tts.HttpSpeechSynthesisResult
+import com.alibaba.dashscope.audio.http_tts.HttpSpeechSynthesizer
+import com.alibaba.dashscope.common.ResultCallback
 import com.alibaba.dashscope.exception.ApiException
 import com.alibaba.dashscope.exception.NoApiKeyException
 import com.alibaba.dashscope.exception.UploadFileException
@@ -14,9 +18,11 @@ import com.github.lonepheasantwarrior.talkify.R
 import com.github.lonepheasantwarrior.talkify.domain.model.AliyunBailianConfig
 import com.github.lonepheasantwarrior.talkify.domain.model.BaseProviderConfig
 import com.github.lonepheasantwarrior.talkify.domain.model.ProviderIds
+import com.github.lonepheasantwarrior.talkify.domain.model.QwenAudioTtsCatalog
 import com.github.lonepheasantwarrior.talkify.service.TtsErrorCode
 import com.github.lonepheasantwarrior.talkify.service.provider.AbstractTtsProvider
 import com.github.lonepheasantwarrior.talkify.service.provider.AudioConfig
+import com.github.lonepheasantwarrior.talkify.service.provider.PcmSpeedProcessor
 import com.github.lonepheasantwarrior.talkify.service.provider.SynthesisParams
 import com.github.lonepheasantwarrior.talkify.service.provider.TextChunkSplitter
 import com.github.lonepheasantwarrior.talkify.service.provider.TtsSynthesisListener
@@ -29,6 +35,8 @@ import io.reactivex.subscribers.DisposableSubscriber
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 阿里云百炼 - 通义千问3语音合成供应商实现
@@ -61,6 +69,28 @@ class AliyunBailianProvider : AbstractTtsProvider() {
 
         @Volatile
         private var defaultEndpointInitialized = false
+
+        /** qwen-audio 单块合成的最长等待（与服务层 120s 请求超时同量级） */
+        private const val QWEN_AUDIO_CHUNK_TIMEOUT_SECONDS = 90L
+
+        /** qwen-audio 接口 rate 取值范围（官方文档：0.5–2.0，默认 1.0） */
+        private const val QWEN_AUDIO_MIN_RATE = 0.5f
+        private const val QWEN_AUDIO_MAX_RATE = 2.0f
+
+        /**
+         * qwen-audio 请求参数（纯函数，便于单元测试）。
+         *
+         * @return rate 已与系统语速相乘并钳制到 [0.5, 2.0]；instruction 为空白时为 null（不携带）
+         */
+        internal fun buildQwenAudioRequestFields(
+            config: AliyunBailianConfig,
+            androidSpeechRate: Float,
+        ): Pair<Float, String?> {
+            val rate = PcmSpeedProcessor.effectiveSpeed(config.speechRate, androidSpeechRate)
+                .coerceIn(QWEN_AUDIO_MIN_RATE, QWEN_AUDIO_MAX_RATE)
+            val instruction = config.styleInstruction.trim().ifBlank { null }
+            return rate to instruction
+        }
     }
 
     @Volatile
@@ -133,7 +163,107 @@ class AliyunBailianProvider : AbstractTtsProvider() {
         // 入口取消上一会话的在飞订阅：stop() 是异步语义，dispose 确保旧任务立即终止
         currentDisposable?.dispose()
 
+        val effectiveModel = qwenConfig.modelId.ifBlank { getDefaultModelId() }
+        if (QwenAudioTtsCatalog.isQwenAudioModel(effectiveModel)) {
+            synthesizeQwenAudio(textChunks, effectiveModel, params, qwenConfig, listener, session)
+            return
+        }
+
         processNextChunk(textChunks, 0, params, qwenConfig, listener, session)
+    }
+
+    /**
+     * qwen-audio-3.x-tts 路径：HttpSpeechSynthesizer（与 qwen3-tts-flash 的
+     * MultiModalConversation 是不同接口），支持 rate 语速与 instruction 指令。
+     *
+     * 在独立工作线程上按块串行合成：每块 streamCall 后以 latch 等待 onComplete/onError，
+     * 无论 SDK 的 streamCall 是同步还是异步回调均成立。停止通过会话代际作废实现。
+     */
+    private fun synthesizeQwenAudio(
+        chunks: List<String>,
+        model: String,
+        params: SynthesisParams,
+        config: AliyunBailianConfig,
+        listener: TtsSynthesisListener,
+        session: Long,
+    ) {
+        val (rate, instruction) = buildQwenAudioRequestFields(config, params.speechRate)
+        val configuredVoice = resolveRequestVoiceId(config.voiceId, params)
+        val voice = QwenAudioTtsCatalog.resolveVoice(model, configuredVoice)
+        val audio = getAudioConfig()
+        logInfo("qwen-audio synthesis: model=$model, voice=$voice, rate=$rate, hasInstruction=${instruction != null}")
+
+        Thread({
+            var started = false
+            for ((index, chunk) in chunks.withIndex()) {
+                if (isCancelled || !isSynthesisSessionActive(session)) return@Thread
+                val latch = CountDownLatch(1)
+                var failure: Throwable? = null
+                var firstPacket = true
+                val callback = object : ResultCallback<HttpSpeechSynthesisResult>() {
+                    override fun onEvent(result: HttpSpeechSynthesisResult) {
+                        if (isCancelled || !isSynthesisSessionActive(session)) return
+                        var data = result.audioData ?: return
+                        if (firstPacket) {
+                            data = WavHeaderSanitizer.stripWavHeader(data)
+                            firstPacket = false
+                        }
+                        if (data.isEmpty()) return
+                        if (!started) {
+                            started = true
+                            listener.onSynthesisStarted()
+                        }
+                        listener.onAudioAvailable(data, audio.sampleRate, audio.audioFormat, audio.channelCount)
+                    }
+
+                    override fun onComplete() {
+                        latch.countDown()
+                    }
+
+                    override fun onError(e: Exception) {
+                        failure = e
+                        latch.countDown()
+                    }
+                }
+                try {
+                    val param = HttpSpeechSynthesisParam.builder()
+                        .apiKey(config.apiKey)
+                        .model(model)
+                        .text(chunk)
+                        .voice(voice)
+                        .format("pcm")
+                        .sampleRate(audio.sampleRate)
+                        .rate(rate)
+                        .apply { if (instruction != null) parameter("instruction", instruction) }
+                        .build()
+                    // 端点是 SDK 全局静态：覆写与发起请求成对持锁（同 P1-16）
+                    synchronized(ENDPOINT_MUTEX) {
+                        val url = config.apiUrl.ifBlank { DEFAULT_API_URL }
+                        if (url != Constants.baseHttpApiUrl) Constants.baseHttpApiUrl = url
+                        HttpSpeechSynthesizer().streamCall(param, callback)
+                    }
+                    if (!latch.await(QWEN_AUDIO_CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                        failure = SocketTimeoutException("qwen-audio chunk $index timed out")
+                    }
+                } catch (t: Throwable) {
+                    // 含 NoClassDefFoundError：SDK 内部使用 java.util.Base64（API 26+）
+                    failure = t
+                }
+                val error = failure
+                if (error != null) {
+                    logError("qwen-audio chunk $index failed", error)
+                    if (isSynthesisSessionActive(session) && !isCancelled) {
+                        val (code, message) = mapExceptionToErrorCode(error as? Exception ?: Exception(error))
+                        listener.onError(TtsErrorCode.getErrorMessage(code, message))
+                    }
+                    return@Thread
+                }
+            }
+            if (!isCancelled && isSynthesisSessionActive(session)) {
+                hasCompleted = true
+                listener.onSynthesisCompleted()
+            }
+        }, "talkify-qwen-audio").start()
     }
 
     private fun processNextChunk(
@@ -445,7 +575,10 @@ class AliyunBailianProvider : AbstractTtsProvider() {
         if (voiceId == null) {
             return false
         }
-        return AudioParameters.Voice.entries.any { it.value == extractRealVoiceName(voiceId) }
+        val name = extractRealVoiceName(voiceId) ?: return false
+        return AudioParameters.Voice.entries.any { it.value == name } ||
+            QwenAudioTtsCatalog.voices.any { it.id == name } ||
+            name.startsWith(QwenAudioTtsCatalog.MODEL_PREFIX)
     }
 
     override fun stop() {
@@ -475,5 +608,9 @@ class AliyunBailianProvider : AbstractTtsProvider() {
     }
 
     override val configLabels: Map<String, Int>
-        get() = mapOf("api_key" to R.string.api_key_label)
+        get() = mapOf(
+            "api_key" to R.string.api_key_label,
+            "style_instruction" to R.string.label_style_instruction,
+            "speech_rate" to R.string.label_speech_rate_multiplier
+        )
 }

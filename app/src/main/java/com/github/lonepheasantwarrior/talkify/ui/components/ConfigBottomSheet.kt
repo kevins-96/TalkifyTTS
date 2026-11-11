@@ -402,6 +402,26 @@ private fun googleApiUrlPlaceholder(apiSpec: String): String =
         GoogleConfig.DEFAULT_INTERACTIONS_API_URL
     }
 
+/**
+ * "语速倍数"下拉项（小米：本地变速；阿里 qwen-audio：rate 参数）。
+ * 值为倍数原文，空串 = 原速；最终倍数还会乘以系统语速（阅读 App 滑块）。
+ */
+private fun speechRateItem(
+    getLabel: (String) -> String?,
+    value: String,
+    context: Context
+): ConfigItem? {
+    val label = getLabel("speech_rate") ?: return null
+    val options = listOf("" to context.getString(R.string.speech_rate_multiplier_default)) +
+        listOf("0.8", "1.2", "1.5", "1.8", "2.0", "2.5", "3.0").map { it to "${it}x" }
+    return ConfigItem(
+        key = "speech_rate",
+        label = label,
+        value = value,
+        dropdownOptions = options
+    )
+}
+
 private fun buildConfigItems(
     config: BaseProviderConfig,
     getLabel: (String) -> String?,
@@ -455,6 +475,22 @@ private fun buildConfigItems(
                     )
                 )
             }
+            val styleLabel = getLabel("style_instruction")
+            if (styleLabel != null) {
+                items.add(
+                    ConfigItem(
+                        key = "style_instruction",
+                        label = styleLabel,
+                        value = config.styleInstruction,
+                        placeholder = context.getString(R.string.style_instruction_placeholder),
+                        supportingText = context.getString(R.string.bailian_style_instruction_hint),
+                        isDialogEditor = true,
+                        editorTitle = context.getString(R.string.style_instruction_edit_title),
+                        guideContent = context.getString(R.string.bailian_style_instruction_guide_content)
+                    )
+                )
+            }
+            speechRateItem(getLabel, config.speechRate, context)?.let { items.add(it) }
         }
         is VolcengineConfig -> {
             val apiKeyLabel = getLabel("api_key")
@@ -533,6 +569,7 @@ private fun buildConfigItems(
                     )
                 )
             }
+            speechRateItem(getLabel, config.speechRate, context)?.let { items.add(it) }
         }
         is MiniMaxConfig -> {
             val label = getLabel("api_key")
@@ -846,7 +883,9 @@ private fun buildConfigFromItems(
                 apiKey = apiKey,
                 voiceId = voiceId,
                 apiUrl = apiUrl,
-                modelId = modelId
+                modelId = modelId,
+                styleInstruction = items.find { it.key == "style_instruction" }?.value ?: "",
+                speechRate = items.find { it.key == "speech_rate" }?.value ?: ""
             )
         }
         is VolcengineConfig -> {
@@ -885,7 +924,8 @@ private fun buildConfigFromItems(
                 voiceId = voiceId,
                 apiUrl = apiUrl,
                 modelId = modelId,
-                styleInstruction = styleInstruction
+                styleInstruction = styleInstruction,
+                speechRate = items.find { it.key == "speech_rate" }?.value ?: ""
             )
         }
         is MiniMaxConfig -> {
