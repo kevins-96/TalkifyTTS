@@ -20,7 +20,8 @@ class XiaomiConfigRepository(
         KEY_VOICE_ID to config.voiceId,
         KEY_API_URL to config.apiUrl,
         KEY_MODEL_ID to config.modelId,
-        KEY_STYLE_INSTRUCTION to config.styleInstruction
+        KEY_STYLE_INSTRUCTION to config.styleInstruction,
+        KEY_SPEECH_RATE to config.speechRate
     )
 
     override fun deserialize(values: Map<String, String>): XiaomiConfig = XiaomiConfig(
@@ -28,7 +29,8 @@ class XiaomiConfigRepository(
         voiceId = values[KEY_VOICE_ID] ?: "",
         apiUrl = values[KEY_API_URL] ?: "",
         modelId = values[KEY_MODEL_ID] ?: "",
-        styleInstruction = values[KEY_STYLE_INSTRUCTION] ?: ""
+        styleInstruction = values[KEY_STYLE_INSTRUCTION] ?: "",
+        speechRate = values[KEY_SPEECH_RATE] ?: ""
     )
 
     private companion object {
@@ -37,5 +39,6 @@ class XiaomiConfigRepository(
         const val KEY_API_URL = "api_url"
         const val KEY_MODEL_ID = "model_id"
         const val KEY_STYLE_INSTRUCTION = "style_instruction"
+        const val KEY_SPEECH_RATE = "speech_rate"
     }
 }

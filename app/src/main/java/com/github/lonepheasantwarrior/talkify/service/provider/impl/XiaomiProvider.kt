@@ -9,6 +9,7 @@ import com.github.lonepheasantwarrior.talkify.service.TtsErrorCode
 import com.github.lonepheasantwarrior.talkify.service.provider.AudioConfig
 import com.github.lonepheasantwarrior.talkify.service.provider.HttpStreamingTtsProvider
 import com.github.lonepheasantwarrior.talkify.service.provider.OpenAIErrorParser
+import com.github.lonepheasantwarrior.talkify.service.provider.PcmSpeedProcessor
 import com.github.lonepheasantwarrior.talkify.service.provider.SynthesisParams
 import com.github.lonepheasantwarrior.talkify.service.provider.TtsSynthesisListener
 import com.github.lonepheasantwarrior.talkify.service.provider.VoiceCapabilityReason
@@ -44,7 +45,8 @@ class XiaomiProvider : HttpStreamingTtsProvider() {
 
     override val configLabels: Map<String, Int> = mapOf(
         "api_key" to R.string.api_key_label,
-        "style_instruction" to R.string.label_style_instruction
+        "style_instruction" to R.string.label_style_instruction,
+        "speech_rate" to R.string.label_speech_rate_multiplier
     )
 
     override val supportedLanguages: Array<String> = arrayOf("zho", "eng")
@@ -164,6 +166,21 @@ class XiaomiProvider : HttpStreamingTtsProvider() {
 
         var hasError = false
 
+        // MiMo 无语速参数且基本不执行语速指令（实测 0.96x～1.14x），语速由本地
+        // 变速不变调实现：设置页倍数 × 系统语速（阅读 App 滑块）。每个文本块一条
+        // 独立音频流，处理器随块创建、块末冲刷，流水线预取的并发块互不干扰
+        val speed = PcmSpeedProcessor.effectiveSpeed(
+            (config as? XiaomiConfig)?.speechRate.orEmpty(),
+            params.speechRate
+        )
+        val speedProcessor = if (PcmSpeedProcessor.isIdentity(speed)) {
+            null
+        } else {
+            val audio = getAudioConfig()
+            PcmSpeedProcessor(audio.sampleRate, audio.channelCount, speed)
+        }
+        if (speedProcessor != null) logDebug("Local time-stretch enabled: speed=$speed")
+
         try {
             body.source().use { source ->
                 while (!source.exhausted() && !isCancelled) {
@@ -201,7 +218,8 @@ class XiaomiProvider : HttpStreamingTtsProvider() {
                         // SSE 格式中，音频数据在 choices[0].delta.audio.data 或 audio 字段中
                         val audioData = extractAudioFromSSE(json)
                         if (audioData != null && audioData.isNotEmpty()) {
-                            emitAudio(audioData, listener)
+                            val out = speedProcessor?.process(audioData) ?: audioData
+                            if (out.isNotEmpty()) emitAudio(out, listener)
                             logDebug("Received audio data: ${audioData.size} bytes")
                         }
 
@@ -210,6 +228,11 @@ class XiaomiProvider : HttpStreamingTtsProvider() {
                         // 继续处理下一行，不中断
                     }
                 }
+            }
+            // 块末冲刷变速缓冲（出错/取消时不冲刷，残留样本随之丢弃）
+            if (speedProcessor != null && !hasError && !isCancelled) {
+                val tail = speedProcessor.flush()
+                if (tail.isNotEmpty()) emitAudio(tail, listener)
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

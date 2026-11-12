@@ -17,11 +17,15 @@ package com.github.lonepheasantwarrior.talkify.domain.model
  *                             对应 v2.5 API 的 user role 消息。
  *                             例如："用温柔的语气朗读"、"用新闻播报风格朗读"。
  *                             为空时不发送 user 消息。
+ *                             注意：实测模型基本不执行语速类指令，语速请用 [speechRate]。
+ * @property speechRate 语速倍数原文（如 "1.5"），空白按 1.0。MiMo 无语速参数，
+ *                      由 Talkify 本地变速不变调实现，并与系统语速相乘。
  */
 data class XiaomiConfig(
     override val voiceId: String = "",
     override val apiUrl: String = "",
     override val modelId: String = "",
     val apiKey: String = "",
-    val styleInstruction: String = ""
+    val styleInstruction: String = "",
+    val speechRate: String = ""
 ) : BaseProviderConfig(voiceId, apiUrl, modelId)

@@ -26,10 +26,16 @@ package com.github.lonepheasantwarrior.talkify.domain.model
  * @property modelId 自定义模型 ID，为空时使用默认模型（默认：qwen3-tts-flash）
  * @property apiKey 阿里云百炼平台的 API Key
  *                  从阿里云控制台获取，需具有百炼服务访问权限
+ * @property styleInstruction 可选指令（方言/情感/角色等），仅 qwen-audio 系列模型生效，
+ *                  映射为请求的 `instruction` 字段
+ * @property speechRate 语速倍数原文（如 "1.5"），空白按 1.0；仅 qwen-audio 系列生效，
+ *                  与系统语速相乘后映射为请求的 `rate`（0.5–2.0）
  */
 data class AliyunBailianConfig(
     override val voiceId: String = "",
     override val apiUrl: String = "",
     override val modelId: String = "",
-    val apiKey: String = ""
+    val apiKey: String = "",
+    val styleInstruction: String = "",
+    val speechRate: String = ""
 ) : BaseProviderConfig(voiceId, apiUrl, modelId)
